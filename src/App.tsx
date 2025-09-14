@@ -44,6 +44,7 @@ interface Account {
   name: string;
   category: AccountCategory;
   normalBalance: TransactionType;
+  beginningBalance: number;
 }
 
 // --- SUPABASE SETUP ---
@@ -232,6 +233,50 @@ const stylesJurnal = StyleSheet.create({
     footer: { position: 'absolute', bottom: 30, left: 35, right: 35, textAlign: 'center', color: 'grey', fontSize: 9 }
 });
 
+// Tipe data baru untuk ringkasan
+interface LedgerSummaryData {
+    accountId: string;
+    accountName: string;
+    beginningBalance: number;
+    totalDebit: number;
+    totalCredit: number;
+    endingBalance: number;
+}
+
+// Template PDF baru untuk mencetak tabel ringkasan
+const TrialBalancePdf: FC<{ company: Company; summaryData: LedgerSummaryData[] }> = ({ company, summaryData }) => (
+    <Document>
+        <Page size="A4" style={stylesJurnal.page} orientation="landscape">
+            <View style={stylesJurnal.headerText}>
+                <Text style={stylesJurnal.companyName}>{company.name.toUpperCase()}</Text>
+                <Text style={stylesJurnal.reportTitle}>Ringkasan Saldo Akun (Neraca Lajur)</Text>
+                <Text style={stylesJurnal.period}>{`Periode ${formatDate(company.fiscalYearStart)} - ${formatDate(company.fiscalYearEnd)}`}</Text>
+            </View>
+            <View style={stylesJurnal.table}>
+                <View style={[stylesJurnal.tableRow, stylesJurnal.tableHeader]}>
+                    <Text style={{width: '25%', padding: 4}}>Akun</Text>
+                    <Text style={{width: '18.75%', padding: 4, textAlign: 'right'}}>Saldo Awal</Text>
+                    <Text style={{width: '18.75%', padding: 4, textAlign: 'right'}}>Debit</Text>
+                    <Text style={{width: '18.75%', padding: 4, textAlign: 'right'}}>Kredit</Text>
+                    <Text style={{width: '18.75%', padding: 4, textAlign: 'right'}}>Saldo Akhir</Text>
+                </View>
+                {summaryData.map(acc => (
+                     <View key={acc.accountId} style={stylesJurnal.tableRow} wrap={false}>
+                        <Text style={{width: '25%', padding: 4}}>{`${acc.accountId} - ${acc.accountName}`}</Text>
+                        <Text style={{width: '18.75%', padding: 4, textAlign: 'right'}}>{formatCurrency(acc.beginningBalance)}</Text>
+                        <Text style={{width: '18.75%', padding: 4, textAlign: 'right'}}>{formatCurrency(acc.totalDebit)}</Text>
+                        <Text style={{width: '18.75%', padding: 4, textAlign: 'right'}}>{formatCurrency(acc.totalCredit)}</Text>
+                        <Text style={{width: '18.75%', padding: 4, textAlign: 'right'}}>{formatCurrency(acc.endingBalance)}</Text>
+                    </View>
+                ))}
+            </View>
+            <Text style={stylesJurnal.footer} render={({ pageNumber, totalPages }) => `${pageNumber} / ${totalPages}`} fixed />
+        </Page>
+    </Document>
+);
+
+
+
 const JurnalUmumPdf: FC<{ company: Company; transactions: Transaction[], accounts: Account[] }> = ({ company, transactions, accounts }) => (
     <Document>
         <Page size="A4" style={stylesJurnal.page} orientation="landscape">
@@ -414,88 +459,94 @@ const JurnalUmum: FC<{ company: Company; transactions: Transaction[], accounts: 
 
 const GeneralLedger: FC<{ company: Company; transactions: Transaction[], accounts: Account[] }> = ({ company, transactions, accounts }) => {
     const [selectedAccountId, setSelectedAccountId] = useState<string>('');
-    const [isExporting, setIsExporting] = useState(false); 
-    const [exportError, setExportError] = useState('');
     
-    // Logika ini sekarang menangani 2 kasus: satu akun spesifik, atau 'semua' akun
-    const ledgerEntries = useMemo(() => {
-        // Jika belum ada yang dipilih, kembalikan array kosong
-        if (!selectedAccountId) return [];
+    const ledgerData = useMemo(() => {
+        if (!selectedAccountId) return null;
 
-        // KASUS 1: Pengguna memilih "Tampilkan Semua Mutasi"
+        // KASUS 1: Tampilkan Ringkasan Semua Akun
         if (selectedAccountId === 'all') {
-            // Cukup urutkan semua transaksi berdasarkan tanggal
-            return [...transactions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+            const startDate = new Date(`${company.fiscalYearStart}T00:00:00`);
+            const summaryData: LedgerSummaryData[] = [];
+            
+            // Ambil semua akun yang punya saldo awal atau punya transaksi
+            const accountsToProcess = accounts.filter(acc => 
+                acc.beginningBalance !== 0 || transactions.some(tx => tx.accountId === acc.id)
+            );
+
+            for (const account of accountsToProcess) {
+                // Perhitungan Saldo Awal dimulai dari data saldo awal di akun
+                let beginningBalance = account.beginningBalance;
+                let totalDebit = 0;
+                let totalCredit = 0;
+
+                const allAccountTx = transactions.filter(tx => tx.accountId === account.id);
+
+                for (const tx of allAccountTx) {
+                    const txDate = new Date(`${tx.date}T00:00:00`);
+                    const amountChange = tx.type === account.normalBalance ? tx.amount : -tx.amount;
+                    
+                    // Tambahkan mutasi sebelum periode fiskal ke saldo awal
+                    if (txDate < startDate) {
+                        beginningBalance += amountChange;
+                    } else { // Transaksi di dalam periode dihitung sebagai mutasi
+                        if (tx.type === 'debit') totalDebit += tx.amount;
+                        if (tx.type === 'credit') totalCredit += tx.amount;
+                    }
+                }
+                
+                const mutationChange = account.normalBalance === 'debit' ? totalDebit - totalCredit : totalCredit - totalDebit;
+                const endingBalance = beginningBalance + mutationChange;
+                
+                summaryData.push({
+                    accountId: account.id,
+                    accountName: account.name,
+                    beginningBalance,
+                    totalDebit,
+                    totalCredit,
+                    endingBalance
+                });
+            }
+            return summaryData;
         }
 
-        // KASUS 2: Pengguna memilih satu akun spesifik (logika yang sudah ada)
+        // KASUS 2: Tampilkan Detail Satu Akun
         const account = accounts.find(acc => acc.id === selectedAccountId);
         if (!account) return [];
+
         const filteredTx = transactions.filter(tx => tx.accountId === selectedAccountId).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-        let runningBalance = 0;
+        
+        // Perhitungan saldo berjalan juga dimulai dari saldo awal akun
+        let runningBalance = account.beginningBalance;
+
         return filteredTx.map(tx => {
             const amountChange = tx.type === account.normalBalance ? tx.amount : -tx.amount;
             runningBalance += amountChange;
             return { ...tx, balance: runningBalance };
         });
-    }, [selectedAccountId, transactions, accounts]);
+    }, [selectedAccountId, transactions, accounts, company.fiscalYearStart]);
 
     const selectedAccount = useMemo(() => accounts.find(acc => acc.id === selectedAccountId), [selectedAccountId, accounts]);
     
-    const handleExportLedgerExcel = useCallback(async () => {
-        // ... (Fungsi ekspor Excel tidak perlu diubah)
-    }, [selectedAccountId, ledgerEntries, accounts]);
-
-    // Tabel untuk menampilkan SEMUA mutasi (mirip Jurnal Umum)
-    const AllTransactionsTable = () => (
-        <div className="overflow-x-auto bg-white rounded-xl shadow-md mt-4">
-            <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                    <tr>
-                        <th className="p-3 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider">Tanggal</th>
-                        <th className="p-3 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider">Deskripsi</th>
-                        <th className="p-3 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider">Akun</th>
-                        <th className="p-3 text-right text-sm font-semibold text-gray-600 uppercase tracking-wider">Debit</th>
-                        <th className="p-3 text-right text-sm font-semibold text-gray-600 uppercase tracking-wider">Kredit</th>
-                    </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                    {ledgerEntries.map(entry => (
-                        <tr key={entry.id} className="hover:bg-gray-50">
-                            <td className="p-3 whitespace-nowrap text-sm text-gray-700">{formatDate(entry.date)}</td>
-                            <td className="p-3 whitespace-nowrap text-sm text-gray-800 font-medium">{entry.description}</td>
-                            <td className="p-3 whitespace-nowrap text-sm text-gray-700">{getAccountName(entry.accountId, accounts)}</td>
-                            <td className="p-3 whitespace-nowrap text-sm text-gray-700 text-right">{entry.type === 'debit' ? formatCurrency(entry.amount) : '-'}</td>
-                            <td className="p-3 whitespace-nowrap text-sm text-gray-700 text-right">{entry.type === 'credit' ? formatCurrency(entry.amount) : '-'}</td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </div>
-    );
-
     return (
         <div className="space-y-4">
             <div className="bg-white p-4 rounded-xl shadow-md flex flex-col sm:flex-row justify-between items-center gap-4">
                 <div className="w-full sm:w-1/2 lg:w-1/3">
                     <label htmlFor="account-select" className="block text-sm font-medium text-gray-700 mb-1">Pilih Akun</label>
-                    <select id="account-select" value={selectedAccountId} onChange={e => { setExportError(''); setSelectedAccountId(e.target.value); }} className="w-full p-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                    <select id="account-select" value={selectedAccountId} onChange={e => setSelectedAccountId(e.target.value)} className="w-full p-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
                         <option value="">-- Tampilkan Mutasi Akun --</option>
-                        {/* OPSI BARU DITAMBAHKAN DI SINI */}
                         <option value="all">-- Tampilkan Semua Mutasi --</option>
                         {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.id} - {acc.name}</option>)}
                     </select>
                 </div>
                 <div className="w-full sm:w-auto flex flex-col sm:flex-row items-center gap-2">
-                    {exportError && <p className="text-sm text-red-600 mb-2 sm:mb-0 sm:mr-2">{exportError}</p>}
                     {selectedAccountId && (
                         <PDFDownloadLink
                             document={
                                 selectedAccountId === 'all' 
-                                ? <JurnalUmumPdf company={company} transactions={ledgerEntries as Transaction[]} accounts={accounts} />
-                                : <BukuBesarPdf company={company} entries={ledgerEntries as (Transaction & { balance: number })[]} account={selectedAccount} />
+                                ? <TrialBalancePdf company={company} summaryData={ledgerData as LedgerSummaryData[]} />
+                                : <BukuBesarPdf company={company} entries={ledgerData as (Transaction & { balance: number })[]} account={selectedAccount} />
                             }
-                            fileName={`Buku Besar - ${selectedAccountId === 'all' ? 'Semua Akun' : selectedAccount?.name}.pdf`}
+                            fileName={`Buku Besar - ${selectedAccountId === 'all' ? 'Ringkasan Saldo' : selectedAccount?.name}.pdf`}
                         >
                             {({ loading }) => (
                                 <button disabled={loading} className="w-full sm:w-auto flex items-center justify-center bg-red-600 text-white px-4 py-2 rounded-lg shadow hover:bg-red-700 transition-colors disabled:bg-gray-400">
@@ -505,22 +556,45 @@ const GeneralLedger: FC<{ company: Company; transactions: Transaction[], account
                             )}
                         </PDFDownloadLink>
                     )}
-                    <button onClick={handleExportLedgerExcel} disabled={isExporting || !selectedAccountId} className="w-full sm:w-auto flex items-center justify-center bg-green-600 text-white px-4 py-2 rounded-lg shadow hover:bg-green-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed">
-                        <Download size={18} className="mr-2" />
-                        {isExporting ? 'Mengekspor...' : 'Ekspor (Excel)'}
-                    </button>
                 </div>
             </div>
-            {/* Logika untuk menampilkan tabel yang sesuai */}
-            {selectedAccountId && (
+
+            {selectedAccountId && ledgerData && (
                 selectedAccountId === 'all'
-                    ? <AllTransactionsTable />
-                    : <LedgerTable entries={ledgerEntries as (Transaction & { balance: number })[]} />
+                    ? (
+                        <div className="bg-white rounded-xl shadow-md p-4">
+                            <h3 className="text-lg font-semibold text-gray-700 mb-3">Ringkasan Saldo Akun (Neraca Lajur)</h3>
+                            <div className="overflow-x-auto">
+                                <table className="min-w-full divide-y divide-gray-200 text-sm">
+                                    <thead className="bg-gray-50">
+                                        <tr>
+                                            <th className="p-2 text-left font-semibold text-gray-600">Akun</th>
+                                            <th className="p-2 text-right font-semibold text-gray-600">Saldo Awal</th>
+                                            <th className="p-2 text-right font-semibold text-gray-600">Mutasi Debit</th>
+                                            <th className="p-2 text-right font-semibold text-gray-600">Mutasi Kredit</th>
+                                            <th className="p-2 text-right font-semibold text-gray-600">Saldo Akhir</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="bg-white divide-y divide-gray-200">
+                                        {(ledgerData as LedgerSummaryData[]).map((acc: LedgerSummaryData) => (
+                                            <tr key={acc.accountId}>
+                                                <td className="p-2 whitespace-nowrap">{acc.accountId} - {acc.accountName}</td>
+                                                <td className="p-2 whitespace-nowrap text-right">{formatCurrency(acc.beginningBalance)}</td>
+                                                <td className="p-2 whitespace-nowrap text-right text-green-600">{formatCurrency(acc.totalDebit)}</td>
+                                                <td className="p-2 whitespace-nowrap text-right text-red-600">{formatCurrency(acc.totalCredit)}</td>
+                                                <td className="p-2 whitespace-nowrap text-right font-bold">{formatCurrency(acc.endingBalance)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )
+                    : <LedgerTable entries={ledgerData as (Transaction & { balance: number })[]} />
             )}
         </div>
     );
 };
-
 
 const ReportRow: FC<{ label: string; amount: number; isTotal?: boolean; highlight?: boolean }> = ({ label, amount, isTotal = false, highlight = false }) => (<div className={`flex justify-between py-1 ${isTotal ? 'border-t mt-1 pt-1' : ''} ${highlight ? 'font-bold text-blue-600' : ''}`}><span className="text-sm text-gray-600">{label}</span><span className="text-sm text-gray-800">{formatCurrency(amount)}</span></div>);
 const LedgerTable: FC<{ entries: (Transaction & { balance: number })[] }> = ({ entries }) => (<div className="overflow-x-auto bg-white rounded-xl shadow-md mt-4"><table className="min-w-full divide-y divide-gray-200"><thead className="bg-gray-50"><tr><th className="p-3 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider">Tanggal</th><th className="p-3 text-left text-sm font-semibold text-gray-600 uppercase tracking-wider">Deskripsi</th><th className="p-3 text-right text-sm font-semibold text-gray-600 uppercase tracking-wider">Debit</th><th className="p-3 text-right text-sm font-semibold text-gray-600 uppercase tracking-wider">Kredit</th><th className="p-3 text-right text-sm font-semibold text-gray-600 uppercase tracking-wider">Saldo</th></tr></thead><tbody className="bg-white divide-y divide-gray-200">{entries.map(entry => (<tr key={entry.id} className="hover:bg-gray-50"><td className="p-3 whitespace-nowrap text-sm text-gray-700">{formatDate(entry.date)}</td><td className="p-3 whitespace-nowrap text-sm text-gray-800 font-medium">{entry.description}</td><td className="p-3 whitespace-nowrap text-sm text-gray-700 text-right">{entry.type === 'debit' ? formatCurrency(entry.amount) : '-'}</td><td className="p-3 whitespace-nowrap text-sm text-gray-700 text-right">{entry.type === 'credit' ? formatCurrency(entry.amount) : '-'}</td><td className="p-3 whitespace-nowrap text-sm text-gray-700 text-right font-semibold">{formatCurrency(entry.balance)}</td></tr>))}</tbody></table></div>);
@@ -615,16 +689,84 @@ const ImportConfirmationModal: FC<{ isOpen: boolean; onClose: () => void; onConf
 };
 
 
-
 const AccountModal: FC<{ isOpen: boolean; onClose: () => void; onSave: (account: Account) => void; existingAccount: Account | null; allAccounts: Account[] }> = ({ isOpen, onClose, onSave, existingAccount, allAccounts }) => {
-    const [account, setAccount] = useState<Account>(existingAccount || { id: '', name: '', category: 'asset', normalBalance: 'debit' });
+    const [account, setAccount] = useState<Account>(existingAccount || { id: '', name: '', category: 'asset', normalBalance: 'debit', beginningBalance: 0 });
     const [error, setError] = useState('');
-    useEffect(() => { setAccount(existingAccount || { id: '', name: '', category: 'asset', normalBalance: 'debit' }); setError(''); }, [existingAccount, isOpen]);
-    const handleChange = (field: keyof Account, value: string) => setAccount(prev => ({ ...prev, [field]: value }));
-    const handleSubmit = () => { if (!account.id || !account.name) { setError('ID Akun dan Nama Akun tidak boleh kosong.'); return; } if (!existingAccount && allAccounts.some(acc => acc.id === account.id)) { setError('ID Akun sudah ada. Harap gunakan ID yang unik.'); return; } onSave(account); };
+
+    useEffect(() => {
+        setAccount(existingAccount || { id: '', name: '', category: 'asset', normalBalance: 'debit', beginningBalance: 0 });
+        setError('');
+    }, [existingAccount, isOpen]);
+
+    const handleChange = (field: keyof Account, value: string | number) => {
+        setAccount(prev => ({ ...prev, [field]: value }));
+    };
+
+    const handleSubmit = () => {
+        if (!account.id || !account.name) {
+            setError('ID Akun dan Nama Akun tidak boleh kosong.');
+            return;
+        }
+        if (!existingAccount && allAccounts.some(acc => acc.id === account.id)) {
+            setError('ID Akun sudah ada. Harap gunakan ID yang unik.');
+            return;
+        }
+        onSave(account);
+    };
+
     if (!isOpen) return null;
-    return (<div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center p-4"><div className="bg-white rounded-lg shadow-xl w-full max-w-md"><div className="flex justify-between items-center p-4 border-b"><h2 className="text-xl font-semibold text-gray-800">{existingAccount ? 'Edit' : 'Tambah'} Akun</h2><button onClick={onClose} className="text-gray-400 hover:text-gray-600"><XCircle size={24} /></button></div><div className="p-6 space-y-4">{error && <div className="text-red-600 bg-red-100 p-3 rounded-md text-sm font-medium">{error}</div>}<div><label className="block text-sm font-medium text-gray-700">ID Akun</label><input type="text" value={account.id} onChange={e => handleChange('id', e.target.value)} disabled={!!existingAccount} className="mt-1 w-full p-2 border rounded-md disabled:bg-gray-100"/></div><div><label className="block text-sm font-medium text-gray-700">Nama Akun</label><input type="text" value={account.name} onChange={e => handleChange('name', e.target.value)} className="mt-1 w-full p-2 border rounded-md"/></div><div><label className="block text-sm font-medium text-gray-700">Kategori</label><select value={account.category} onChange={e => handleChange('category', e.target.value)} className="mt-1 w-full p-2 border rounded-md"><option value="asset">Aset</option><option value="liability">Liabilitas</option><option value="equity">Ekuitas</option><option value="income">Pendapatan</option><option value="expense">Beban</option></select></div><div><label className="block text-sm font-medium text-gray-700">Saldo Normal</label><select value={account.normalBalance} onChange={e => handleChange('normalBalance', e.target.value)} className="mt-1 w-full p-2 border rounded-md"><option value="debit">Debit</option><option value="credit">Kredit</option></select></div></div><div className="flex justify-end p-4 border-t bg-gray-50 rounded-b-lg"><button onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-md mr-2 hover:bg-gray-300">Batal</button><button onClick={handleSubmit} className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">Simpan</button></div></div></div>);
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-md">
+                <div className="flex justify-between items-center p-4 border-b">
+                    <h2 className="text-xl font-semibold text-gray-800">{existingAccount ? 'Edit' : 'Tambah'} Akun</h2>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><XCircle size={24} /></button>
+                </div>
+                <div className="p-6 space-y-4">
+                    {error && <div className="text-red-600 bg-red-100 p-3 rounded-md text-sm font-medium">{error}</div>}
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">ID Akun</label>
+                        <input type="text" value={account.id} onChange={e => handleChange('id', e.target.value)} disabled={!!existingAccount} className="mt-1 w-full p-2 border rounded-md disabled:bg-gray-100"/>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Nama Akun</label>
+                        <input type="text" value={account.name} onChange={e => handleChange('name', e.target.value)} className="mt-1 w-full p-2 border rounded-md"/>
+                    </div>
+                    {/* --- INPUT SALDO AWAL DITAMBAHKAN DI SINI --- */}
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Saldo Awal</label>
+                        <input 
+                            type="number" 
+                            value={account.beginningBalance} 
+                            onChange={e => handleChange('beginningBalance', parseFloat(e.target.value) || 0)} 
+                            className="mt-1 w-full p-2 border rounded-md"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Kategori</label>
+                        <select value={account.category} onChange={e => handleChange('category', e.target.value)} className="mt-1 w-full p-2 border rounded-md">
+                            <option value="asset">Aset</option><option value="liability">Liabilitas</option><option value="equity">Ekuitas</option><option value="income">Pendapatan</option><option value="expense">Beban</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Saldo Normal</label>
+                        <select value={account.normalBalance} onChange={e => handleChange('normalBalance', e.target.value)} className="mt-1 w-full p-2 border rounded-md">
+                            <option value="debit">Debit</option><option value="credit">Kredit</option>
+                        </select>
+                    </div>
+                </div>
+                <div className="flex justify-end p-4 border-t bg-gray-50 rounded-b-lg">
+                    <button onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-md mr-2 hover:bg-gray-300">Batal</button>
+                    <button onClick={handleSubmit} className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">Simpan</button>
+                </div>
+            </div>
+        </div>
+    );
 };
+
+
+
 const TransactionModal: FC<{ isOpen: boolean; onClose: () => void; onSave: (entries: Partial<Transaction>[], options?: { kenaPpn?: boolean; potongPph23?: boolean; baseAmount?: number; desc?: string; date?: string}) => void; initialData?: Transaction[] | null; isJurnalUmum: boolean; setIsJurnalUmum: (isJurnal: boolean) => void; allAccounts: Account[] }> = ({ isOpen, onClose, onSave, initialData, isJurnalUmum, setIsJurnalUmum, allAccounts }) => {
     const [simpleDesc, setSimpleDesc] = useState(''); const [simpleAmount, setSimpleAmount] = useState<number>(0); const [simpleDate, setSimpleDate] = useState(new Date().toISOString().split('T')[0]); const [simpleAccountId, setSimpleAccountId] = useState(''); const [kenaPpn, setKenaPpn] = useState(false); const [potongPph23, setPotongPph23] = useState(false); const [transactionNature, setTransactionNature] = useState<'income' | 'expense' | null>(null); const [entries, setEntries] = useState<Partial<Transaction>[]>(initialData || [{ type: 'debit' }, { type: 'credit' }]); const [commonDesc, setCommonDesc] = useState(initialData?.[0]?.description || ''); const [commonDate, setCommonDate] = useState(initialData?.[0]?.date || new Date().toISOString().split('T')[0]); const [error, setError] = useState('');
     useEffect(() => { if (initialData) { setEntries(initialData); setCommonDesc(initialData[0]?.description || ''); setCommonDate(initialData[0]?.date || new Date().toISOString().split('T')[0]); } else { setSimpleDesc(''); setSimpleAmount(0); setSimpleDate(new Date().toISOString().split('T')[0]); setSimpleAccountId(''); setKenaPpn(false); setPotongPph23(false); setTransactionNature(null); setEntries([{ type: 'debit' }, { type: 'credit' }]); setCommonDesc(''); setCommonDate(new Date().toISOString().split('T')[0]); } setError(''); }, [initialData, isOpen]);
@@ -842,23 +984,39 @@ const AccountingWorkspace: FC<{ company: Company; onBack: () => void; supabase: 
     const [itemToDelete, setItemToDelete] = useState<{ type: 'transaction' | 'account', id: string } | null>(null);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
-    const fetchData = useCallback(async () => {
-        try {
-            setError(null);
-            setLoading(true);
-            const { data: accountsData, error: accountsError } = await supabase.from('accounts').select('*').eq('company_id', company.id).order('id');
-            if (accountsError) throw accountsError;
 
-            const { data: transactionsData, error: transactionsError } = await supabase.from('transactions').select('*').eq('company_id', company.id).order('date', { ascending: false });
-            if (transactionsError) throw transactionsError;
-            
-            setAccounts(accountsData.map((a: any) => ({...a, normalBalance: a.normal_balance})) as Account[]);
-            setTransactions(transactionsData.map((t: any) => ({...t, accountId: t.account_id})) as Transaction[]);
-        } catch (err: any) {
-            setError(`Gagal memuat data: ${err.message}`);
-        } finally {
-            setLoading(false);
-        }
+    const fetchData = useCallback(async () => {
+    try {
+        setError(null);
+        setLoading(true);
+        const { data: accountsData, error: accountsError } = await supabase.from('accounts').select('*').eq('company_id', company.id).order('id');
+        if (accountsError) throw accountsError;
+
+        const { data: transactionsData, error: transactionsError } = await supabase.from('transactions').select('*').eq('company_id', company.id).order('date', { ascending: false });
+        if (transactionsError) throw transactionsError;
+        
+        setAccounts(accountsData.map((a: any) => ({
+            id: a.id,
+            name: a.name,
+            category: a.category,
+            normalBalance: a.normal_balance,
+            beginningBalance: a.beginning_balance // Ini baris penting yang mengambil saldo awal
+        })) as Account[]);
+        
+        setTransactions(transactionsData.map((t: any) => ({
+            id: t.id,
+            date: t.date,
+            description: t.description,
+            accountId: t.account_id,
+            type: t.type,
+            amount: t.amount
+        })) as Transaction[]);
+
+    } catch (err: any) {
+        setError(`Gagal memuat data: ${err.message}`);
+    } finally {
+        setLoading(false);
+    }
     }, [supabase, company.id]);
 
     useEffect(() => {
@@ -918,11 +1076,20 @@ const AccountingWorkspace: FC<{ company: Company; onBack: () => void; supabase: 
         else handleCloseTxModal();
     }, [isJurnalUmum, accounts, handleCloseTxModal, supabase, company.id]);
     
+
+
     const handleSaveAccount = useCallback(async (account: Account) => { 
-        const { id, name, category, normalBalance } = account;
-        const dbAccount = { id, name, category, normal_balance: normalBalance, company_id: company.id };
-        const { error } = await supabase.from('accounts').upsert(dbAccount, { onConflict: 'id,company_id' });
-        if(error) setError(`Gagal menyimpan akun: ${error.message}`);
+    const { id, name, category, normalBalance, beginningBalance } = account; // Ambil beginningBalance
+    const dbAccount = { 
+        id, 
+        name, 
+        category, 
+        normal_balance: normalBalance, 
+        beginning_balance: beginningBalance, // Tambahkan ke payload
+        company_id: company.id 
+    };
+    const { error } = await supabase.from('accounts').upsert(dbAccount, { onConflict: 'id,company_id' });
+    if(error) setError(`Gagal menyimpan akun: ${error.message}`);
     }, [supabase, company.id]);
 
     const handleFileImport = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
