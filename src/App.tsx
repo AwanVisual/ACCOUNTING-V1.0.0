@@ -783,6 +783,21 @@ const AccountModal: FC<{ isOpen: boolean; onClose: () => void; onSave: (account:
         setError('');
     }, [existingAccount, isOpen]);
 
+    // --- LOGIKA OTOMATIS DITAMBAHKAN DI SINI ---
+    // useEffect ini akan berjalan setiap kali nilai account.category berubah
+    useEffect(() => {
+        const debitCategories: AccountCategory[] = ['asset', 'cost_of_sales', 'expense', 'other_expense'];
+        
+        // Periksa apakah kategori yang dipilih termasuk dalam kategori dengan saldo normal DEBIT
+        if (debitCategories.includes(account.category)) {
+            // Jika ya, atur saldo normal menjadi 'debit'
+            setAccount(prev => ({ ...prev, normalBalance: 'debit' }));
+        } else {
+            // Jika tidak (artinya liability, equity, income), atur menjadi 'credit'
+            setAccount(prev => ({ ...prev, normalBalance: 'credit' }));
+        }
+    }, [account.category]); // <-- "Pemicu"-nya adalah perubahan kategori
+
     const handleChange = (field: keyof Account, value: string | number) => {
         setAccount(prev => ({ ...prev, [field]: value }));
     };
@@ -829,7 +844,6 @@ const AccountModal: FC<{ isOpen: boolean; onClose: () => void; onSave: (account:
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700">Kategori</label>
-                        {/* --- PERUBAHAN DI DROPDOWN INI --- */}
                         <select value={account.category} onChange={e => handleChange('category', e.target.value)} className="mt-1 w-full p-2 border rounded-md">
                             <option value="asset">1 - Aset</option>
                             <option value="liability">2 - Liabilitas</option>
@@ -843,7 +857,13 @@ const AccountModal: FC<{ isOpen: boolean; onClose: () => void; onSave: (account:
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700">Saldo Normal</label>
-                        <select value={account.normalBalance} onChange={e => handleChange('normalBalance', e.target.value)} className="mt-1 w-full p-2 border rounded-md">
+                        {/* --- INPUT INI SEKARANG DINONAKTIFKAN (DISABLED) --- */}
+                        <select 
+                            value={account.normalBalance} 
+                            onChange={e => handleChange('normalBalance', e.target.value)} 
+                            className="mt-1 w-full p-2 border rounded-md bg-gray-100 cursor-not-allowed"
+                            disabled 
+                        >
                             <option value="debit">Debit</option>
                             <option value="credit">Kredit</option>
                         </select>
