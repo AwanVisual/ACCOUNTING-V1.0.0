@@ -18,7 +18,7 @@ interface SupabaseClient {
 }
 
 type TransactionType = 'debit' | 'credit';
-type AccountCategory = 'asset' | 'liability' | 'equity' | 'income' | 'expense';
+type AccountCategory = 'asset' | 'liability' | 'equity' | 'income' | 'expense' | 'cost_of_sales' | 'other_income' | 'other_expense';
 
 interface Company {
     id: string;
@@ -373,10 +373,76 @@ const TransactionTable: FC<{ transactions: Transaction[], accounts: Account[]; o
 };
 
 const Reports: FC<{ company: Company; transactions: Transaction[], accounts: Account[] }> = ({ company, transactions, accounts }) => {
-    const { pnl, balanceSheet, labaBersih, totalAset, totalLiabilitas, totalEkuitas } = useMemo(() => { const accountBalances: { [key: string]: number } = {}; accounts.forEach(acc => accountBalances[acc.id] = 0); transactions.forEach(tx => { const account = accounts.find(acc => acc.id === tx.accountId); if (!account) return; accountBalances[tx.accountId] += tx.type === account.normalBalance ? tx.amount : -tx.amount; }); const pnl = { pendapatan: accounts.filter(a => a.category === 'income').map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 })), beban: accounts.filter(a => a.category === 'expense').map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 }))}; const labaBersih = pnl.pendapatan.reduce((s, i) => s + i.amount, 0) - pnl.beban.reduce((s, i) => s + i.amount, 0); const labaDitahanAcc = accounts.find(a => a.id === '3-9999'); if (labaDitahanAcc) { accountBalances['3-9999'] = (accountBalances['3-9999'] || 0) + labaBersih; } const balanceSheet = { aset: accounts.filter(a => a.category === 'asset').map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 })), liabilitas: accounts.filter(a => a.category === 'liability').map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 })), ekuitas: accounts.filter(a => a.category === 'equity').map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 }))}; const totalAset = balanceSheet.aset.reduce((s, i) => s + i.amount, 0); const totalLiabilitas = balanceSheet.liabilitas.reduce((s, i) => s + i.amount, 0); const totalEkuitas = balanceSheet.ekuitas.reduce((s, i) => s + i.amount, 0); return { pnl, balanceSheet, labaBersih, totalAset, totalLiabilitas, totalEkuitas }; }, [transactions, accounts]);
-    const [isExporting, setIsExporting] = useState(false); const [exportError, setExportError] = useState('');
+    const { pnl, balanceSheet, labaBersih, totalAset, totalLiabilitas, totalEkuitas } = useMemo(() => {
+        const accountBalances: { [key: string]: number } = {};
+        accounts.forEach(acc => accountBalances[acc.id] = 0);
+        transactions.forEach(tx => {
+            const account = accounts.find(acc => acc.id === tx.accountId);
+            if (!account) return;
+            accountBalances[tx.accountId] += tx.type === account.normalBalance ? tx.amount : -tx.amount;
+        });
+
+        // Logika Laba Rugi yang sudah disesuaikan dengan kategori baru
+        const pnl = {
+            pendapatan: accounts
+                .filter(a => a.category === 'income' || a.category === 'other_income')
+                .map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 })),
+            beban: accounts
+                .filter(a => a.category === 'expense' || a.category === 'cost_of_sales' || a.category === 'other_expense')
+                .map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 }))
+        };
+        const labaBersih = pnl.pendapatan.reduce((s, i) => s + i.amount, 0) - pnl.beban.reduce((s, i) => s + i.amount, 0);
+        
+        const labaDitahanAcc = accounts.find(a => a.id === '3-9999');
+        if (labaDitahanAcc) {
+            accountBalances['3-9999'] = (accountBalances['3-9999'] || 0) + labaBersih;
+        }
+        
+        const balanceSheet = {
+            aset: accounts.filter(a => a.category === 'asset').map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 })),
+            liabilitas: accounts.filter(a => a.category === 'liability').map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 })),
+            ekuitas: accounts.filter(a => a.category === 'equity').map(a => ({ name: a.name, amount: accountBalances[a.id] || 0 }))
+        };
+        const totalAset = balanceSheet.aset.reduce((s, i) => s + i.amount, 0);
+        const totalLiabilitas = balanceSheet.liabilitas.reduce((s, i) => s + i.amount, 0);
+        const totalEkuitas = balanceSheet.ekuitas.reduce((s, i) => s + i.amount, 0);
+        
+        return { pnl, balanceSheet, labaBersih, totalAset, totalLiabilitas, totalEkuitas };
+    }, [transactions, accounts]);
+
+    const [isExporting, setIsExporting] = useState(false);
+    const [exportError, setExportError] = useState('');
     
-    const handleExportExcel = useCallback(async () => { setIsExporting(true); setExportError(''); try { if (!window.XLSX) { await new Promise((resolve, reject) => { const script = document.createElement('script'); script.src = "https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"; script.onload = resolve; script.onerror = () => reject(new Error("Gagal memuat library export.")); document.head.appendChild(script); }); } const period = `PERIODE ${formatDate(company.fiscalYearStart)} - ${formatDate(company.fiscalYearEnd)}`; const labaRugiData = [ { A: company.name.toUpperCase() }, { A: company.address || '' }, { A: 'LAPORAN LABA RUGI' }, { A: period }, {}, { A: 'Keterangan', B: 'Jumlah (IDR)' }, { A: 'PENDAPATAN' }, ...pnl.pendapatan.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL PENDAPATAN', B: pnl.pendapatan.reduce((s, i) => s + i.amount, 0) }, { A: '' }, { A: 'BEBAN' }, ...pnl.beban.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL BEBAN', B: pnl.beban.reduce((s, i) => s + i.amount, 0) }, { A: '' }, { A: 'LABA / RUGI BERSIH', B: labaBersih }]; const neracaData = [ { A: company.name.toUpperCase() }, { A: company.address || '' }, { A: 'NERACA' }, { A: `PER ${formatDate(company.fiscalYearEnd)}`}, {}, { A: 'Keterangan', B: 'Jumlah (IDR)' }, { A: 'ASET' }, ...balanceSheet.aset.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL ASET', B: totalAset }, { A: '' }, { A: 'LIABILITAS' }, ...balanceSheet.liabilitas.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL LIABILITAS', B: totalLiabilitas }, { A: '' }, { A: 'EKUITAS' }, ...balanceSheet.ekuitas.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL EKUITAS', B: totalEkuitas }, { A: '' }, { A: 'TOTAL LIABILITAS & EKUITAS', B: totalLiabilitas + totalEkuitas }]; const wb = window.XLSX.utils.book_new(); const wsLR = window.XLSX.utils.json_to_sheet(labaRugiData, { skipHeader: true }); const wsNeraca = window.XLSX.utils.json_to_sheet(neracaData, { skipHeader: true }); wsLR['!cols'] = [{ wch: 40 }, { wch: 20 }]; wsNeraca['!cols'] = [{ wch: 40 }, { wch: 20 }]; window.XLSX.utils.book_append_sheet(wb, wsLR, "Laba Rugi"); window.XLSX.utils.book_append_sheet(wb, wsNeraca, "Neraca"); window.XLSX.writeFile(wb, `Laporan Keuangan - ${company.name} - ${new Date().toISOString().slice(0,10)}.xlsx`); } catch (error) { setExportError((error as Error).message || "Terjadi kesalahan saat mengekspor."); } finally { setIsExporting(false); } }, [pnl, balanceSheet, labaBersih, totalAset, totalLiabilitas, totalEkuitas, company]);
+    const handleExportExcel = useCallback(async () => {
+        setIsExporting(true);
+        setExportError('');
+        try {
+            if (!window.XLSX) {
+                await new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = "https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js";
+                    script.onload = resolve;
+                    script.onerror = () => reject(new Error("Gagal memuat library export."));
+                    document.head.appendChild(script);
+                });
+            }
+            const period = `PERIODE ${formatDate(company.fiscalYearStart)} - ${formatDate(company.fiscalYearEnd)}`;
+            const labaRugiData = [ { A: company.name.toUpperCase() }, { A: company.address || '' }, { A: 'LAPORAN LABA RUGI' }, { A: period }, {}, { A: 'Keterangan', B: 'Jumlah (IDR)' }, { A: 'PENDAPATAN' }, ...pnl.pendapatan.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL PENDAPATAN', B: pnl.pendapatan.reduce((s, i) => s + i.amount, 0) }, { A: '' }, { A: 'BEBAN' }, ...pnl.beban.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL BEBAN', B: pnl.beban.reduce((s, i) => s + i.amount, 0) }, { A: '' }, { A: 'LABA / RUGI BERSIH', B: labaBersih }];
+            const neracaData = [ { A: company.name.toUpperCase() }, { A: company.address || '' }, { A: 'NERACA' }, { A: `PER ${formatDate(company.fiscalYearEnd)}`}, {}, { A: 'Keterangan', B: 'Jumlah (IDR)' }, { A: 'ASET' }, ...balanceSheet.aset.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL ASET', B: totalAset }, { A: '' }, { A: 'LIABILITAS' }, ...balanceSheet.liabilitas.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL LIABILITAS', B: totalLiabilitas }, { A: '' }, { A: 'EKUITAS' }, ...balanceSheet.ekuitas.map(i => ({ A: `  ${i.name}`, B: i.amount })), { A: 'TOTAL EKUITAS', B: totalEkuitas }, { A: '' }, { A: 'TOTAL LIABILITAS & EKUITAS', B: totalLiabilitas + totalEkuitas }];
+            const wb = window.XLSX.utils.book_new();
+            const wsLR = window.XLSX.utils.json_to_sheet(labaRugiData, { skipHeader: true });
+            const wsNeraca = window.XLSX.utils.json_to_sheet(neracaData, { skipHeader: true });
+            wsLR['!cols'] = [{ wch: 40 }, { wch: 20 }];
+            wsNeraca['!cols'] = [{ wch: 40 }, { wch: 20 }];
+            window.XLSX.utils.book_append_sheet(wb, wsLR, "Laba Rugi");
+            window.XLSX.utils.book_append_sheet(wb, wsNeraca, "Neraca");
+            window.XLSX.writeFile(wb, `Laporan Keuangan - ${company.name} - ${new Date().toISOString().slice(0,10)}.xlsx`);
+        } catch (error) {
+            setExportError((error as Error).message || "Terjadi kesalahan saat mengekspor.");
+        } finally {
+            setIsExporting(false);
+        }
+    }, [pnl, balanceSheet, labaBersih, totalAset, totalLiabilitas, totalEkuitas, company]);
 
     const getLabaRugiPdfData = () => ({
         sections: [
@@ -400,29 +466,48 @@ const Reports: FC<{ company: Company; transactions: Transaction[], accounts: Acc
             <div className="flex justify-end items-center gap-2">
                 {exportError && <p className="text-sm text-red-600 mr-4">{exportError}</p>}
                 <PDFDownloadLink
-                    document={
-                        <LaporanKeuanganPdf
-                            company={company}
-                            pnlData={getLabaRugiPdfData()}
-                            neracaData={getNeracaPdfData()}
-                            period={`Periode ${formatDate(company.fiscalYearStart)} - ${formatDate(company.fiscalYearEnd)}`}
-                            neracaDate={`Per Tanggal ${formatDate(company.fiscalYearEnd)}`}
-                        />
-                    }
-                    fileName={`Laporan Keuangan - ${company.name}.pdf`}
-                >
-                    {({ loading }) => (
-                         <button disabled={loading} className="flex items-center justify-center bg-red-600 text-white px-4 py-2 rounded-lg shadow hover:bg-red-700 transition-colors disabled:bg-gray-400">
-                            <Download size={18} className="mr-2" />
-                            {loading ? 'Membuat PDF...' : 'Ekspor Laporan Keuangan (PDF)'}
-                         </button>
-                    )}
+                    document={<LaporanKeuanganPdf company={company} pnlData={getLabaRugiPdfData()} neracaData={getNeracaPdfData()} period={`Periode ${formatDate(company.fiscalYearStart)} - ${formatDate(company.fiscalYearEnd)}`} neracaDate={`Per Tanggal ${formatDate(company.fiscalYearEnd)}`}/>}
+                    fileName={`Laporan Keuangan - ${company.name}.pdf`}>
+                    {({ loading }) => ( <button disabled={loading} className="flex items-center justify-center bg-red-600 text-white px-4 py-2 rounded-lg shadow hover:bg-red-700 transition-colors disabled:bg-gray-400"><Download size={18} className="mr-2" />{loading ? 'Membuat PDF...' : 'Ekspor Laporan Keuangan (PDF)'}</button>)}
                 </PDFDownloadLink>
                 <button onClick={handleExportExcel} disabled={isExporting} className="flex items-center justify-center bg-green-600 text-white px-4 py-2 rounded-lg shadow hover:bg-green-700 transition-colors disabled:bg-gray-400"><Download size={18} className="mr-2" />{isExporting ? 'Mengekspor...' : 'Ekspor Laporan (Excel)'}</button>
             </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="bg-white p-6 rounded-xl shadow-md space-y-4"><h3 className="text-lg font-semibold text-gray-700 border-b pb-2">Laporan Laba Rugi</h3><p className="text-sm text-gray-500">Periode: {formatDate(company.fiscalYearStart)} - {formatDate(company.fiscalYearEnd)}</p><div><h4 className="font-semibold text-gray-600">Pendapatan</h4>{pnl.pendapatan.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}<ReportRow label="Total Pendapatan" amount={pnl.pendapatan.reduce((s, i) => s + i.amount, 0)} isTotal /></div><div><h4 className="font-semibold text-gray-600">Beban</h4>{pnl.beban.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}<ReportRow label="Total Beban" amount={pnl.beban.reduce((s, i) => s + i.amount, 0)} isTotal /></div><ReportRow label="Laba / Rugi Bersih" amount={labaBersih} isTotal highlight /></div>
-                <div className="bg-white p-6 rounded-xl shadow-md space-y-4"><h3 className="text-lg font-semibold text-gray-700 border-b pb-2">Neraca</h3><p className="text-sm text-gray-500">Per Tanggal: {formatDate(company.fiscalYearEnd)}</p><div><h4 className="font-semibold text-gray-600">Aset</h4>{balanceSheet.aset.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}<ReportRow label="Total Aset" amount={totalAset} isTotal /></div><div><h4 className="font-semibold text-gray-600">Liabilitas</h4>{balanceSheet.liabilitas.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}<ReportRow label="Total Liabilitas" amount={totalLiabilitas} isTotal /></div><div><h4 className="font-semibold text-gray-600">Ekuitas</h4>{balanceSheet.ekuitas.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}<ReportRow label="Total Ekuitas" amount={totalEkuitas} isTotal /></div><ReportRow label="Total Liabilitas & Ekuitas" amount={totalLiabilitas + totalEkuitas} isTotal highlight /></div>
+                <div className="bg-white p-6 rounded-xl shadow-md space-y-4">
+                    <h3 className="text-lg font-semibold text-gray-700 border-b pb-2">Laporan Laba Rugi</h3>
+                    <p className="text-sm text-gray-500">Periode: {formatDate(company.fiscalYearStart)} - {formatDate(company.fiscalYearEnd)}</p>
+                    <div>
+                        <h4 className="font-semibold text-gray-600">Pendapatan</h4>
+                        {pnl.pendapatan.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}
+                        <ReportRow label="Total Pendapatan" amount={pnl.pendapatan.reduce((s, i) => s + i.amount, 0)} isTotal />
+                    </div>
+                    <div>
+                        <h4 className="font-semibold text-gray-600">Beban</h4>
+                        {pnl.beban.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}
+                        <ReportRow label="Total Beban" amount={pnl.beban.reduce((s, i) => s + i.amount, 0)} isTotal />
+                    </div>
+                    <ReportRow label="Laba / Rugi Bersih" amount={labaBersih} isTotal highlight />
+                </div>
+                <div className="bg-white p-6 rounded-xl shadow-md space-y-4">
+                    <h3 className="text-lg font-semibold text-gray-700 border-b pb-2">Neraca</h3>
+                    <p className="text-sm text-gray-500">Per Tanggal: {formatDate(company.fiscalYearEnd)}</p>
+                    <div>
+                        <h4 className="font-semibold text-gray-600">Aset</h4>
+                        {balanceSheet.aset.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}
+                        <ReportRow label="Total Aset" amount={totalAset} isTotal />
+                    </div>
+                    <div>
+                        <h4 className="font-semibold text-gray-600">Liabilitas</h4>
+                        {balanceSheet.liabilitas.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}
+                        <ReportRow label="Total Liabilitas" amount={totalLiabilitas} isTotal />
+                    </div>
+                    <div>
+                        <h4 className="font-semibold text-gray-600">Ekuitas</h4>
+                        {balanceSheet.ekuitas.map(i => <ReportRow key={i.name} label={i.name} amount={i.amount} />)}
+                        <ReportRow label="Total Ekuitas" amount={totalEkuitas} isTotal />
+                    </div>
+                    <ReportRow label="Total Liabilitas & Ekuitas" amount={totalLiabilitas + totalEkuitas} isTotal highlight />
+                </div>
             </div>
         </div>
     );
@@ -733,7 +818,6 @@ const AccountModal: FC<{ isOpen: boolean; onClose: () => void; onSave: (account:
                         <label className="block text-sm font-medium text-gray-700">Nama Akun</label>
                         <input type="text" value={account.name} onChange={e => handleChange('name', e.target.value)} className="mt-1 w-full p-2 border rounded-md"/>
                     </div>
-                    {/* --- INPUT SALDO AWAL DITAMBAHKAN DI SINI --- */}
                     <div>
                         <label className="block text-sm font-medium text-gray-700">Saldo Awal</label>
                         <input 
@@ -745,14 +829,23 @@ const AccountModal: FC<{ isOpen: boolean; onClose: () => void; onSave: (account:
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700">Kategori</label>
+                        {/* --- PERUBAHAN DI DROPDOWN INI --- */}
                         <select value={account.category} onChange={e => handleChange('category', e.target.value)} className="mt-1 w-full p-2 border rounded-md">
-                            <option value="asset">Aset</option><option value="liability">Liabilitas</option><option value="equity">Ekuitas</option><option value="income">Pendapatan</option><option value="expense">Beban</option>
+                            <option value="asset">1 - Aset</option>
+                            <option value="liability">2 - Liabilitas</option>
+                            <option value="equity">3 - Ekuitas</option>
+                            <option value="income">4 - Pendapatan (Income)</option>
+                            <option value="cost_of_sales">5 - Harga Pokok Penjualan (COGS)</option>
+                            <option value="expense">6 - Beban (Expense)</option>
+                            <option value="other_income">8 - Pendapatan Lain-lain</option>
+                            <option value="other_expense">9 - Beban Lain-lain</option>
                         </select>
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700">Saldo Normal</label>
                         <select value={account.normalBalance} onChange={e => handleChange('normalBalance', e.target.value)} className="mt-1 w-full p-2 border rounded-md">
-                            <option value="debit">Debit</option><option value="credit">Kredit</option>
+                            <option value="debit">Debit</option>
+                            <option value="credit">Kredit</option>
                         </select>
                     </div>
                 </div>
